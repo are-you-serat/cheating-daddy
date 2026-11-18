@@ -169,6 +169,26 @@ async function initializeLocal(profile = 'interview') {
     }
 }
 
+async function initializeGigaamCodex(profile = 'interview') {
+    const prefs = await storage.getPreferences();
+    const config = {
+        pythonPath: prefs.gigaamPythonPath || (process.platform === 'win32' ? 'python' : 'python3'),
+        gigaamModel: prefs.gigaamModel || 'v3_e2e_rnnt',
+        codexPath: prefs.codexCliPath || (process.platform === 'win32' ? 'codex.exe' : 'codex'),
+        codexModel: prefs.codexModel || 'gpt-5.6-sol',
+        workingDirectory: prefs.codexWorkingDirectory || '',
+    };
+
+    const success = await ipcRenderer.invoke('initialize-gigaam-codex', config, profile, prefs.customPrompt || '');
+    if (success) {
+        cheatingDaddy.setStatus('GigaAM + Codex Live');
+        return true;
+    }
+
+    cheatingDaddy.setStatus('error');
+    return false;
+}
+
 async function cancelLocalInitialization() {
     return ipcRenderer.invoke('cancel-local-initialization');
 }
@@ -249,9 +269,30 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 }
             }
         } else if (isLinux) {
-            // Linux - use display media for screen capture and try to get system audio
-            try {
-                // First try to get system audio via getDisplayMedia (works on newer browsers)
+            // Linux portals commonly expose video only. Capture the active
+            // PipeWire/PulseAudio monitor in the main process instead.
+            const needsSystemAudio = audioMode === 'speaker_only' || audioMode === 'both';
+            let nativeSystemAudio = false;
+
+            if (needsSystemAudio) {
+                const audioResult = await ipcRenderer.invoke('start-linux-system-audio', preferencesCache.linuxAudioMonitor || '@DEFAULT_MONITOR@');
+                nativeSystemAudio = audioResult.success;
+                if (!nativeSystemAudio) {
+                    console.warn('Native Linux system audio failed:', audioResult.error);
+                }
+            }
+
+            if (nativeSystemAudio || !needsSystemAudio) {
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 1,
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
+                    audio: false,
+                });
+            } else {
+                // Browser fallback for desktops that support portal audio.
                 mediaStream = await navigator.mediaDevices.getDisplayMedia({
                     video: {
                         frameRate: 1,
@@ -261,28 +302,15 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                     audio: {
                         sampleRate: SAMPLE_RATE,
                         channelCount: 1,
-                        echoCancellation: false, // Don't cancel system audio
+                        echoCancellation: false,
                         noiseSuppression: false,
                         autoGainControl: false,
                     },
                 });
-
-                console.log('Linux system audio capture via getDisplayMedia succeeded');
-
-                // Setup audio processing for Linux system audio
+                if (mediaStream.getAudioTracks().length === 0) {
+                    throw new Error('Linux screen capture returned no system audio. Select a valid PipeWire monitor in Customize → Audio Input.');
+                }
                 setupLinuxSystemAudioProcessing();
-            } catch (systemAudioError) {
-                console.warn('System audio via getDisplayMedia failed, trying screen-only capture:', systemAudioError);
-
-                // Fallback to screen-only capture
-                mediaStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: {
-                        frameRate: 1,
-                        width: { ideal: 1920 },
-                        height: { ideal: 1080 },
-                    },
-                    audio: false,
-                });
             }
 
             // Additionally get microphone input for Linux based on audio mode
@@ -310,7 +338,7 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 }
             }
 
-            console.log('Linux capture started - system audio:', mediaStream.getAudioTracks().length > 0, 'microphone mode:', audioMode);
+            console.log('Linux capture started - native system audio:', nativeSystemAudio, 'microphone mode:', audioMode);
         } else {
             // Windows - use display media with loopback for system audio
             mediaStream = await navigator.mediaDevices.getDisplayMedia({
@@ -364,6 +392,9 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
         console.log('Manual mode enabled - screenshots will be captured on demand only');
     } catch (err) {
         console.error('Error starting capture:', err);
+        if (isLinux) {
+            await ipcRenderer.invoke('stop-linux-system-audio').catch(() => {});
+        }
         cheatingDaddy.setStatus('error');
     }
 }
@@ -695,6 +726,12 @@ function stopCapture() {
     if (isMacOS) {
         ipcRenderer.invoke('stop-macos-audio').catch(err => {
             console.error('Error stopping macOS audio:', err);
+        });
+    }
+
+    if (isLinux) {
+        ipcRenderer.invoke('stop-linux-system-audio').catch(err => {
+            console.error('Error stopping Linux system audio:', err);
         });
     }
 
@@ -1088,6 +1125,7 @@ const cheatingDaddy = {
     initializeGemini,
     initializeCloud,
     initializeLocal,
+    initializeGigaamCodex,
     cancelLocalInitialization,
     startCapture,
     stopCapture,

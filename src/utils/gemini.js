@@ -7,14 +7,21 @@ const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, increm
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
-// Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
+// Lazy-loaded to avoid circular dependencies (both providers import shared
+// session/render helpers from this module).
 let _localai = null;
 function getLocalAi() {
     if (!_localai) _localai = require('./localai');
     return _localai;
 }
 
-// Provider mode: 'byok', 'cloud', or 'local'
+let _gigaamCodex = null;
+function getGigaamCodex() {
+    if (!_gigaamCodex) _gigaamCodex = require('./gigaam-codex');
+    return _gigaamCodex;
+}
+
+// Provider mode: 'byok', 'cloud', 'local', or 'codex'
 let currentProviderMode = 'byok';
 
 // Groq conversation history for context
@@ -45,6 +52,8 @@ module.exports.formatSpeakerResults = formatSpeakerResults;
 
 // Audio capture variables
 let systemAudioProc = null;
+let linuxAudioProc = null;
+let linuxAudioStopping = false;
 let messageBuffer = '';
 let groqRequestStartedForTurn = false;
 
@@ -64,6 +73,17 @@ function sendToRenderer(channel, data) {
     if (windows.length > 0) {
         windows[0].webContents.send(channel, data);
     }
+}
+
+function decodePcmAudio(data) {
+    if (typeof data !== 'string' || data.length === 0 || data.length > 2 * 1024 * 1024) {
+        throw new Error('Invalid audio payload');
+    }
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.length === 0 || buffer.length > 1024 * 1024) {
+        throw new Error('Audio payload is outside the allowed size');
+    }
+    return buffer;
 }
 
 // Build context message for session restoration
@@ -919,14 +939,7 @@ async function startMacOSAudioCapture(geminiSessionRef) {
 
             const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
 
-            if (currentProviderMode === 'cloud') {
-                sendCloudAudio(monoChunk);
-            } else if (currentProviderMode === 'local') {
-                getLocalAi().processLocalAudio(monoChunk);
-            } else {
-                const base64Data = monoChunk.toString('base64');
-                sendAudioToGemini(base64Data, geminiSessionRef);
-            }
+            routeCapturedAudio(monoChunk, geminiSessionRef);
 
             if (process.env.DEBUG_AUDIO) {
                 console.log(`Processed audio chunk: ${chunk.length} bytes`);
@@ -955,6 +968,100 @@ async function startMacOSAudioCapture(geminiSessionRef) {
     });
 
     return true;
+}
+
+function routeCapturedAudio(monoChunk, geminiSessionRef) {
+    if (currentProviderMode === 'cloud') {
+        sendCloudAudio(monoChunk);
+    } else if (currentProviderMode === 'local') {
+        getLocalAi().processLocalAudio(monoChunk);
+    } else if (currentProviderMode === 'codex') {
+        getGigaamCodex().processAudio(monoChunk);
+    } else {
+        sendAudioToGemini(monoChunk.toString('base64'), geminiSessionRef);
+    }
+}
+
+function validateLinuxMonitor(value) {
+    const monitor = typeof value === 'string' && value.trim() ? value.trim() : '@DEFAULT_MONITOR@';
+    if (monitor.length > 512 || /[\0\r\n]/.test(monitor)) {
+        throw new Error('Invalid Linux audio monitor name');
+    }
+    return monitor;
+}
+
+async function startLinuxSystemAudioCapture(geminiSessionRef, monitorName = '@DEFAULT_MONITOR@') {
+    if (process.platform !== 'linux') return false;
+    stopLinuxSystemAudioCapture();
+
+    const monitor = validateLinuxMonitor(monitorName);
+    const chunkSize = 24000 * 2 * 0.1;
+    let audioBuffer = Buffer.alloc(0);
+    linuxAudioStopping = false;
+
+    linuxAudioProc = spawn(
+        'parec',
+        [
+            `--device=${monitor}`,
+            '--client-name=CheatingDaddy',
+            '--stream-name=SystemAudioCapture',
+            '--rate=24000',
+            '--format=s16le',
+            '--channels=1',
+            '--latency-msec=100',
+            '--raw',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+
+    linuxAudioProc.stdout.on('data', data => {
+        audioBuffer = Buffer.concat([audioBuffer, data]);
+        while (audioBuffer.length >= chunkSize) {
+            const chunk = audioBuffer.subarray(0, chunkSize);
+            audioBuffer = audioBuffer.subarray(chunkSize);
+            routeCapturedAudio(chunk, geminiSessionRef);
+        }
+    });
+    linuxAudioProc.stderr.on('data', data => {
+        const message = data.toString('utf8').trim();
+        if (message) console.error('[Linux audio]', message);
+    });
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            console.log(`[Linux audio] Capturing ${monitor} with parec`);
+            resolve(true);
+        }, 500);
+
+        linuxAudioProc.once('error', error => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                reject(new Error(`Unable to start parec: ${error.message}`));
+            }
+        });
+        linuxAudioProc.once('exit', code => {
+            linuxAudioProc = null;
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                reject(new Error(`parec stopped with exit code ${code}`));
+            } else if (!linuxAudioStopping && code !== 0) {
+                sendToRenderer('update-status', `Linux system audio stopped (${code})`);
+            }
+        });
+    });
+}
+
+function stopLinuxSystemAudioCapture() {
+    linuxAudioStopping = true;
+    if (linuxAudioProc) {
+        linuxAudioProc.kill('SIGTERM');
+        linuxAudioProc = null;
+    }
 }
 
 function convertStereoToMono(stereoBuffer) {
@@ -1091,6 +1198,18 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         return success;
     });
 
+    ipcMain.handle('initialize-gigaam-codex', async (event, config, profile = 'interview', customPrompt = '') => {
+        if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
+        if (typeof profile !== 'string' || profile.length > 64) return false;
+        if (typeof customPrompt !== 'string' || customPrompt.length > 20000) return false;
+        currentProviderMode = 'codex';
+        const success = await getGigaamCodex().initializeSession(config, profile, customPrompt);
+        if (!success) {
+            currentProviderMode = 'byok';
+        }
+        return success;
+    });
+
     ipcMain.handle('cancel-local-initialization', async () => {
         const cancelled = await getLocalAi().cancelLocalInitialization();
         if (cancelled) {
@@ -1102,7 +1221,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
         if (currentProviderMode === 'cloud') {
             try {
-                const pcmBuffer = Buffer.from(data, 'base64');
+                const pcmBuffer = decodePcmAudio(data);
                 sendCloudAudio(pcmBuffer);
                 return { success: true };
             } catch (error) {
@@ -1112,11 +1231,21 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
         if (currentProviderMode === 'local') {
             try {
-                const pcmBuffer = Buffer.from(data, 'base64');
+                const pcmBuffer = decodePcmAudio(data);
                 getLocalAi().processLocalAudio(pcmBuffer);
                 return { success: true };
             } catch (error) {
                 console.error('Error sending local audio:', error);
+                return { success: false, error: error.message };
+            }
+        }
+        if (currentProviderMode === 'codex') {
+            try {
+                const pcmBuffer = decodePcmAudio(data);
+                getGigaamCodex().processAudio(pcmBuffer);
+                return { success: true };
+            } catch (error) {
+                console.error('Error sending audio to GigaAM:', error);
                 return { success: false, error: error.message };
             }
         }
@@ -1137,7 +1266,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
         if (currentProviderMode === 'cloud') {
             try {
-                const pcmBuffer = Buffer.from(data, 'base64');
+                const pcmBuffer = decodePcmAudio(data);
                 sendCloudAudio(pcmBuffer);
                 return { success: true };
             } catch (error) {
@@ -1147,11 +1276,21 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
         if (currentProviderMode === 'local') {
             try {
-                const pcmBuffer = Buffer.from(data, 'base64');
+                const pcmBuffer = decodePcmAudio(data);
                 getLocalAi().processLocalAudio(pcmBuffer);
                 return { success: true };
             } catch (error) {
                 console.error('Error sending local mic audio:', error);
+                return { success: false, error: error.message };
+            }
+        }
+        if (currentProviderMode === 'codex') {
+            try {
+                const pcmBuffer = decodePcmAudio(data);
+                getGigaamCodex().processAudio(pcmBuffer);
+                return { success: true };
+            } catch (error) {
+                console.error('Error sending mic audio to GigaAM:', error);
                 return { success: false, error: error.message };
             }
         }
@@ -1197,6 +1336,10 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return result;
             }
 
+            if (currentProviderMode === 'codex') {
+                return getGigaamCodex().sendImage(data, prompt);
+            }
+
             const result = hasGroqKey() ? await sendImageToGroq(data, prompt) : await sendImageToGeminiHttp(data, prompt);
             return result;
         } catch (error) {
@@ -1229,6 +1372,10 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 console.error('Error sending local text:', error);
                 return { success: false, error: error.message };
             }
+        }
+
+        if (currentProviderMode === 'codex') {
+            return getGigaamCodex().sendText(text.trim());
         }
 
         if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
@@ -1266,6 +1413,21 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
     });
 
+    ipcMain.handle('start-linux-system-audio', async (event, monitorName) => {
+        try {
+            const success = await startLinuxSystemAudioCapture(geminiSessionRef, monitorName);
+            return { success };
+        } catch (error) {
+            console.error('Error starting Linux system audio:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('stop-linux-system-audio', async () => {
+        stopLinuxSystemAudioCapture();
+        return { success: true };
+    });
+
     ipcMain.handle('stop-macos-audio', async event => {
         try {
             stopMacOSAudioCapture();
@@ -1279,6 +1441,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('close-session', async event => {
         try {
             stopMacOSAudioCapture();
+            stopLinuxSystemAudioCapture();
 
             if (currentProviderMode === 'cloud') {
                 closeCloud();
@@ -1289,6 +1452,13 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             if (currentProviderMode === 'local') {
                 getLocalAi().closeLocalSession();
+                currentProviderMode = 'byok';
+                closeTransportLog();
+                return { success: true };
+            }
+
+            if (currentProviderMode === 'codex') {
+                getGigaamCodex().closeSession();
                 currentProviderMode = 'byok';
                 closeTransportLog();
                 return { success: true };
@@ -1358,6 +1528,8 @@ module.exports = {
     startMacOSAudioCapture,
     convertStereoToMono,
     stopMacOSAudioCapture,
+    startLinuxSystemAudioCapture,
+    stopLinuxSystemAudioCapture,
     sendAudioToGemini,
     sendImageToGeminiHttp,
     setupGeminiIpcHandlers,

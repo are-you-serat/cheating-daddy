@@ -41,6 +41,20 @@ export class AssistantView extends LitElement {
             display: inline-block;
         }
 
+        .response-container .math-inline {
+            display: inline-block;
+            max-width: 100%;
+            vertical-align: middle;
+        }
+
+        .response-container .math-display {
+            display: block;
+            max-width: 100%;
+            margin: 0.75em 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
         /* ── Markdown ── */
 
         .response-container h1,
@@ -338,49 +352,191 @@ export class AssistantView extends LitElement {
     }
 
     renderMarkdown(content) {
+        const markdown = this.normalizeMarkdown(content);
         if (typeof window !== 'undefined' && window.marked) {
             try {
+                const protectedMarkdown = this.extractMathExpressions(markdown);
                 window.marked.setOptions({
                     breaks: true,
                     gfm: true,
-                    sanitize: false,
+                    headerIds: false,
+                    mangle: false,
                 });
-                let rendered = window.marked.parse(content);
-                rendered = this.wrapWordsInSpans(rendered);
-                return rendered;
+                const rendered = this.sanitizeRenderedMarkdown(window.marked.parse(protectedMarkdown.markdown));
+                return this.renderMathExpressions(rendered, protectedMarkdown.expressions);
             } catch (error) {
                 console.warn('Error parsing markdown:', error);
-                return content;
             }
         }
-        return content;
+        return this.escapeHtml(markdown).replace(/\n/g, '<br>');
     }
 
-    wrapWordsInSpans(html) {
+    normalizeMarkdown(content) {
+        const markdown = typeof content === 'string' ? content : String(content ?? '');
+        const outerFence = markdown.trim().match(/^```(?:markdown|md)\s*\r?\n([\s\S]*?)\r?\n```$/i);
+        return outerFence ? outerFence[1] : markdown;
+    }
+
+    extractMathExpressions(markdown) {
+        const expressions = [];
+        const protect = (source, pattern, displayMode) =>
+            source.replace(pattern, (raw, expression) => {
+                const token = `CDMATHTOKEN${expressions.length}X`;
+                expressions.push({ expression: expression.trim(), displayMode, raw });
+                return token;
+            });
+
+        let protectedMarkdown = protect(markdown, /\\\[([\s\S]*?)\\\]/g, true);
+        protectedMarkdown = protect(protectedMarkdown, /\$\$([\s\S]*?)\$\$/g, true);
+        protectedMarkdown = protect(protectedMarkdown, /\\\(([\s\S]*?)\\\)/g, false);
+        return { markdown: protectedMarkdown, expressions };
+    }
+
+    escapeHtml(content) {
+        return content.replace(/[&<>"']/g, character => {
+            const entities = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            };
+            return entities[character];
+        });
+    }
+
+    sanitizeRenderedMarkdown(html) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
-        const tagsToSkip = ['PRE'];
+        const allowedTags = new Set([
+            'A',
+            'B',
+            'BLOCKQUOTE',
+            'BR',
+            'CODE',
+            'DEL',
+            'EM',
+            'H1',
+            'H2',
+            'H3',
+            'H4',
+            'H5',
+            'H6',
+            'HR',
+            'I',
+            'INPUT',
+            'LI',
+            'OL',
+            'P',
+            'PRE',
+            'S',
+            'STRONG',
+            'TABLE',
+            'TBODY',
+            'TD',
+            'TFOOT',
+            'TH',
+            'THEAD',
+            'TR',
+            'U',
+            'UL',
+        ]);
+        const discardTags = new Set(['EMBED', 'FORM', 'IFRAME', 'MATH', 'OBJECT', 'SCRIPT', 'STYLE', 'SVG', 'TEMPLATE']);
 
-        function wrap(node) {
-            if (node.nodeType === Node.TEXT_NODE && node.textContent.trim() && !tagsToSkip.includes(node.parentNode.tagName)) {
-                const words = node.textContent.split(/(\s+)/);
-                const frag = document.createDocumentFragment();
-                words.forEach(word => {
-                    if (word.trim()) {
-                        const span = document.createElement('span');
-                        span.setAttribute('data-word', '');
-                        span.textContent = word;
-                        frag.appendChild(span);
-                    } else {
-                        frag.appendChild(document.createTextNode(word));
-                    }
-                });
-                node.parentNode.replaceChild(frag, node);
-            } else if (node.nodeType === Node.ELEMENT_NODE && !tagsToSkip.includes(node.tagName)) {
-                Array.from(node.childNodes).forEach(wrap);
+        const sanitizeNode = node => {
+            Array.from(node.childNodes).forEach(sanitizeNode);
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+            if (discardTags.has(node.tagName)) {
+                node.remove();
+                return;
             }
+            if (!allowedTags.has(node.tagName)) {
+                node.replaceWith(...node.childNodes);
+                return;
+            }
+
+            for (const attribute of Array.from(node.attributes)) {
+                const name = attribute.name.toLowerCase();
+                const isTableAlignment = ['TD', 'TH'].includes(node.tagName) && name === 'align';
+                const isCodeClass = node.tagName === 'CODE' && name === 'class' && /^(?:hljs\s+)?language-[\w-]+$/.test(attribute.value);
+                const isCheckboxAttribute = node.tagName === 'INPUT' && ['type', 'checked', 'disabled'].includes(name);
+                const isLinkAttribute = node.tagName === 'A' && ['href', 'title'].includes(name);
+                if (!isTableAlignment && !isCodeClass && !isCheckboxAttribute && !isLinkAttribute) node.removeAttribute(attribute.name);
+            }
+
+            if (node.tagName === 'INPUT') {
+                if (node.getAttribute('type') !== 'checkbox') {
+                    node.remove();
+                    return;
+                }
+                node.setAttribute('disabled', '');
+            }
+
+            if (node.tagName === 'A') {
+                const href = node.getAttribute('href') || '';
+                if (!/^(?:https?:|mailto:)/i.test(href)) node.removeAttribute('href');
+                if (node.hasAttribute('href')) {
+                    node.setAttribute('target', '_blank');
+                    node.setAttribute('rel', 'noopener noreferrer');
+                }
+            }
+        };
+
+        Array.from(doc.body.childNodes).forEach(sanitizeNode);
+        return doc.body.innerHTML;
+    }
+
+    renderMathExpressions(html, expressions) {
+        if (!expressions.length) return html;
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        let currentNode;
+        while ((currentNode = walker.nextNode())) textNodes.push(currentNode);
+
+        for (const textNode of textNodes) {
+            const tokenPattern = /CDMATHTOKEN(\d+)X/g;
+            if (!tokenPattern.test(textNode.textContent)) continue;
+            tokenPattern.lastIndex = 0;
+
+            if (textNode.parentElement?.closest('code, pre')) {
+                textNode.textContent = textNode.textContent.replace(tokenPattern, (_token, index) => expressions[Number(index)]?.raw || _token);
+                continue;
+            }
+
+            const fragment = doc.createDocumentFragment();
+            let lastIndex = 0;
+            let match;
+            while ((match = tokenPattern.exec(textNode.textContent))) {
+                if (match.index > lastIndex) fragment.append(doc.createTextNode(textNode.textContent.slice(lastIndex, match.index)));
+
+                const item = expressions[Number(match[1])];
+                if (!item) {
+                    fragment.append(doc.createTextNode(match[0]));
+                } else {
+                    const container = doc.createElement('span');
+                    container.className = item.displayMode ? 'math-display' : 'math-inline';
+                    if (window.katex) {
+                        window.katex.render(item.expression, container, {
+                            displayMode: item.displayMode,
+                            throwOnError: false,
+                            strict: 'ignore',
+                            trust: false,
+                        });
+                    } else {
+                        container.textContent = item.raw;
+                    }
+                    fragment.append(container);
+                }
+                lastIndex = tokenPattern.lastIndex;
+            }
+            if (lastIndex < textNode.textContent.length) fragment.append(doc.createTextNode(textNode.textContent.slice(lastIndex)));
+            textNode.replaceWith(fragment);
         }
-        Array.from(doc.body.childNodes).forEach(wrap);
+
         return doc.body.innerHTML;
     }
 
@@ -668,6 +824,7 @@ export class AssistantView extends LitElement {
         const hasMultipleResponses = this.responses.length > 1;
 
         return html`
+            <link rel="stylesheet" href="../node_modules/katex/dist/katex.min.css" />
             <div class="response-container" id="responseContainer"></div>
 
             ${hasMultipleResponses ? html`

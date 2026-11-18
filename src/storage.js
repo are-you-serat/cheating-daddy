@@ -29,11 +29,17 @@ const DEFAULT_PREFERENCES = {
     selectedImageQuality: 'medium',
     advancedMode: false,
     audioMode: 'speaker_only',
+    linuxAudioMonitor: '@DEFAULT_MONITOR@',
     fontSize: 'medium',
     backgroundTransparency: 0.8,
     googleSearchEnabled: false,
     localLlmModel: 'unsloth/Qwen3.5-4B-GGUF:Q4_K_M',
     whisperModel: 'tiny.en',
+    gigaamModel: 'v3_e2e_rnnt',
+    gigaamPythonPath: process.platform === 'win32' ? 'python' : 'python3',
+    codexCliPath: process.platform === 'win32' ? 'codex.exe' : 'codex',
+    codexModel: 'gpt-5.6-sol',
+    codexWorkingDirectory: '',
 };
 
 const DEFAULT_KEYBINDS = null; // null means use system defaults

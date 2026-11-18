@@ -31,6 +31,33 @@ A real-time AI assistant that provides contextual help during video calls, inter
 2. **Install Dependencies**: `npm install`
 3. **Run the App**: `npm start`
 
+### GigaAM v3 + Codex CLI mode
+
+This mode replaces the Gemini API key with local Russian speech recognition and an authenticated Codex CLI session:
+
+1. Install `ffmpeg`, Python 3.10 or newer (3.10–3.13 recommended for current PyTorch builds), and the
+   [Codex CLI](https://developers.openai.com/codex/cli/). Run `codex login` once.
+2. Create a dedicated Python environment and install the official GigaAM package:
+
+    ```bash
+    python3.11 -m venv ~/.local/share/cheating-daddy/gigaam-venv
+    git clone https://github.com/salute-developers/GigaAM.git /tmp/GigaAM
+    ~/.local/share/cheating-daddy/gigaam-venv/bin/pip install -e '/tmp/GigaAM[torch]'
+    ```
+
+3. Select **GigaAM + Codex CLI** on the home screen. Set **Python executable** to the virtual environment's
+   Python (for example `~/.local/share/cheating-daddy/gigaam-venv/bin/python`). The default Codex model is
+   `gpt-5.6-sol` with low reasoning effort and the standard service tier.
+4. To provide a fixed reference document, place a UTF-8 `lab.md` file in the configured **Working directory**.
+   It is loaded once when the session starts; a small local section search supplies only the relevant excerpts to each request.
+
+The default `v3_e2e_rnnt` model adds punctuation and text normalization. Its weights are downloaded on the
+first start. Audio and transcription stay local; only the resulting text (and manually submitted screenshots)
+is passed to Codex CLI. A persistent Codex app-server keeps the session warm and streams answer deltas into the UI;
+its conversation thread is ephemeral and uses a read-only sandbox. User MCP servers, shell commands, web search, apps,
+and plugins are disabled, so reference material must be supplied through `lab.md`. MathJax-viewer formula links in the
+document are decoded to LaTeX locally.
+
 ## Usage
 
 1. Enter your Gemini API key in the main window
@@ -50,11 +77,12 @@ A real-time AI assistant that provides contextual help during video calls, inter
 
 - **macOS**: [SystemAudioDump](https://github.com/Mohammed-Yasin-Mulla/Sound) for system audio
 - **Windows**: Loopback audio capture
-- **Linux**: Microphone input
+- **Linux**: PipeWire/PulseAudio monitor capture through `parec`. If the default monitor is silent, set the active sink monitor in
+  **Customize → Audio Input → Linux System Audio Monitor** (find names with `pactl list short sources`).
 
 ## Requirements
 
 - Electron-compatible OS (macOS, Windows, Linux)
-- Gemini API key
+- Gemini API key, or a configured GigaAM + Codex CLI environment
 - Screen recording permissions
 - Microphone/audio permissions

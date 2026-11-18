@@ -709,6 +709,13 @@ export class MainView extends LitElement {
         _useCustomLocalLlmModel: { state: true },
         _whisperModel: { state: true },
         _showLocalHelp: { state: true },
+        // GigaAM + Codex CLI state
+        _gigaamModel: { state: true },
+        _gigaamPythonPath: { state: true },
+        _codexCliPath: { state: true },
+        _codexModel: { state: true },
+        _codexWorkingDirectory: { state: true },
+        _codexError: { state: true },
     };
 
     constructor() {
@@ -737,6 +744,12 @@ export class MainView extends LitElement {
         this._localLlmModel = 'unsloth/Qwen3.5-4B-GGUF:Q4_K_M';
         this._useCustomLocalLlmModel = false;
         this._whisperModel = 'tiny.en';
+        this._gigaamModel = 'v3_e2e_rnnt';
+        this._gigaamPythonPath = navigator.platform.toUpperCase().indexOf('WIN') >= 0 ? 'python' : 'python3';
+        this._codexCliPath = navigator.platform.toUpperCase().indexOf('WIN') >= 0 ? 'codex.exe' : 'codex';
+        this._codexModel = 'gpt-5.6-sol';
+        this._codexWorkingDirectory = '';
+        this._codexError = false;
 
         this._animId = null;
         this._time = 0;
@@ -776,6 +789,11 @@ export class MainView extends LitElement {
             this._localLlmModel = prefs.localLlmModel || 'unsloth/Qwen3.5-4B-GGUF:Q4_K_M';
             this._useCustomLocalLlmModel = !LOCAL_LLM_PRESETS.some(preset => preset.value === this._localLlmModel);
             this._whisperModel = prefs.whisperModel || 'tiny.en';
+            this._gigaamModel = prefs.gigaamModel || 'v3_e2e_rnnt';
+            this._gigaamPythonPath = prefs.gigaamPythonPath || (navigator.platform.toUpperCase().indexOf('WIN') >= 0 ? 'python' : 'python3');
+            this._codexCliPath = prefs.codexCliPath || (navigator.platform.toUpperCase().indexOf('WIN') >= 0 ? 'codex.exe' : 'codex');
+            this._codexModel = prefs.codexModel || 'gpt-5.6-sol';
+            this._codexWorkingDirectory = prefs.codexWorkingDirectory || '';
 
             this.requestUpdate();
         } catch (e) {
@@ -918,6 +936,7 @@ export class MainView extends LitElement {
         this._mode = mode;
         this._tokenError = false;
         this._keyError = false;
+        this._codexError = false;
         await cheatingDaddy.storage.updatePreference('providerMode', mode);
         this.requestUpdate();
     }
@@ -1001,6 +1020,38 @@ export class MainView extends LitElement {
         this.requestUpdate();
     }
 
+    async _saveGigaamModel(val) {
+        this._gigaamModel = val;
+        await cheatingDaddy.storage.updatePreference('gigaamModel', val);
+        this.requestUpdate();
+    }
+
+    async _saveGigaamPythonPath(val) {
+        this._gigaamPythonPath = val;
+        this._codexError = false;
+        await cheatingDaddy.storage.updatePreference('gigaamPythonPath', val);
+        this.requestUpdate();
+    }
+
+    async _saveCodexCliPath(val) {
+        this._codexCliPath = val;
+        this._codexError = false;
+        await cheatingDaddy.storage.updatePreference('codexCliPath', val);
+        this.requestUpdate();
+    }
+
+    async _saveCodexModel(val) {
+        this._codexModel = val;
+        await cheatingDaddy.storage.updatePreference('codexModel', val);
+        this.requestUpdate();
+    }
+
+    async _saveCodexWorkingDirectory(val) {
+        this._codexWorkingDirectory = val;
+        await cheatingDaddy.storage.updatePreference('codexWorkingDirectory', val);
+        this.requestUpdate();
+    }
+
     _handleProfileChange(e) {
         this.onProfileChange(e.target.value);
     }
@@ -1032,17 +1083,25 @@ export class MainView extends LitElement {
             if (!this._localLlmModel.trim()) {
                 return;
             }
+        } else if (this._mode === 'codex') {
+            if (!this._gigaamPythonPath.trim() || !this._codexCliPath.trim()) {
+                this._codexError = true;
+                this.requestUpdate();
+                return;
+            }
         }
 
         this.onStart();
     }
 
     triggerApiKeyError() {
-        this._keyError = this._mode !== 'local';
+        this._keyError = this._mode === 'byok';
+        this._codexError = this._mode === 'codex';
         this.requestUpdate();
         setTimeout(() => {
             this._tokenError = false;
             this._keyError = false;
+            this._codexError = false;
             this.requestUpdate();
         }, 2000);
     }
@@ -1106,29 +1165,25 @@ export class MainView extends LitElement {
             >
                 <canvas class="btn-aurora"></canvas>
                 <canvas class="btn-dither"></canvas>
-                ${
-                    isDownloading
-                        ? html`<span
-                              class="download-progress-fill ${hasPercentage ? '' : 'indeterminate'}"
-                              style=${hasPercentage ? `width: ${percentage}%` : ''}
-                          ></span>`
-                        : ''
-                }
+                ${isDownloading
+                    ? html`<span
+                          class="download-progress-fill ${hasPercentage ? '' : 'indeterminate'}"
+                          style=${hasPercentage ? `width: ${percentage}%` : ''}
+                      ></span>`
+                    : ''}
                 <span class="btn-label">
                     ${isDownloading ? (hasPercentage ? `${percentage}%` : 'Preparing...') : 'Start Session'}
                     ${isDownloading ? '' : html`<span class="shortcut-hint">${isMac ? cmdIcon : ctrlIcon}${enterIcon}</span>`}
                 </span>
             </button>
-            ${
-                isDownloading
-                    ? html`
-                          <div class="download-controls">
-                              <span>Downloading: ${this.downloadProgress.label || 'Local AI files'}</span>
-                              <button class="download-cancel" @click=${() => this.onCancelDownload()}>Cancel</button>
-                          </div>
-                      `
-                    : ''
-            }
+            ${isDownloading
+                ? html`
+                      <div class="download-controls">
+                          <span>Downloading: ${this.downloadProgress.label || 'Local AI files'}</span>
+                          <button class="download-cancel" @click=${() => this.onCancelDownload()}>Cancel</button>
+                      </div>
+                  `
+                : ''}
         `;
     }
 
@@ -1239,6 +1294,7 @@ export class MainView extends LitElement {
 
             <div class="mode-links">
                 <button class="mode-link" @click=${() => this._saveMode('local')}>Use local AI</button>
+                <button class="mode-link" @click=${() => this._saveMode('codex')}>Use GigaAM + Codex CLI</button>
             </div>
         `;
     }
@@ -1265,18 +1321,16 @@ export class MainView extends LitElement {
                             ${LOCAL_LLM_PRESETS.map(preset => html`<option value=${preset.value}>${preset.label}</option>`)}
                             <option value="custom">Custom Hugging Face model or local GGUF…</option>
                         </select>
-                        ${
-                            this._useCustomLocalLlmModel
-                                ? html`
-                                      <input
-                                          type="text"
-                                          placeholder="owner/repository:quant or /absolute/model.gguf"
-                                          .value=${this._localLlmModel}
-                                          @input=${event => this._saveLocalLlmModel(event.target.value)}
-                                      />
-                                  `
-                                : ''
-                        }
+                        ${this._useCustomLocalLlmModel
+                            ? html`
+                                  <input
+                                      type="text"
+                                      placeholder="owner/repository:quant or /absolute/model.gguf"
+                                      .value=${this._localLlmModel}
+                                      @input=${event => this._saveLocalLlmModel(event.target.value)}
+                                  />
+                              `
+                            : ''}
                         <div class="form-hint">Sizes include the vision model. Q4 uses less memory; Q8 preserves more quality.</div>
                     </div>
                 </div>
@@ -1312,6 +1366,105 @@ export class MainView extends LitElement {
 
             <div class="mode-links">
                 <button class="mode-link" @click=${() => this._saveMode('byok')}>Use own API keys</button>
+                <button class="mode-link" @click=${() => this._saveMode('codex')}>Use GigaAM + Codex CLI</button>
+            </div>
+        `;
+    }
+
+    // ── GigaAM + Codex CLI mode ──
+
+    _renderCodexMode() {
+        return html`
+            <details class="config-section" open>
+                <summary class="config-summary">
+                    <span class="config-summary-text">
+                        <span class="config-summary-title">Transcription</span>
+                        <span class="config-summary-description">Local GigaAM v3 process</span>
+                    </span>
+                    ${this._renderConfigChevron()}
+                </summary>
+                <div class="config-content">
+                    <div class="form-group">
+                        <label class="form-label">GigaAM model</label>
+                        <select .value=${this._gigaamModel} @change=${event => this._saveGigaamModel(event.target.value)}>
+                            <option value="v3_e2e_rnnt">v3 E2E RNN-T — punctuation and normalization</option>
+                            <option value="v3_e2e_ctc">v3 E2E CTC — punctuation and normalization</option>
+                            <option value="v3_rnnt">v3 RNN-T</option>
+                            <option value="v3_ctc">v3 CTC</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Python executable</label>
+                        <input
+                            type="text"
+                            placeholder="/path/to/gigaam-venv/bin/python"
+                            .value=${this._gigaamPythonPath}
+                            @input=${event => this._saveGigaamPythonPath(event.target.value)}
+                            class=${this._codexError && !this._gigaamPythonPath.trim() ? 'error' : ''}
+                        />
+                        <div class="form-hint">Use a Python 3.10+ environment with the official GigaAM package and ffmpeg installed.</div>
+                    </div>
+                </div>
+            </details>
+
+            <details class="config-section" open>
+                <summary class="config-summary">
+                    <span class="config-summary-text">
+                        <span class="config-summary-title">AI responses</span>
+                        <span class="config-summary-description">Authenticated Codex CLI, no Gemini key</span>
+                    </span>
+                    ${this._renderConfigChevron()}
+                </summary>
+                <div class="config-content">
+                    <div class="form-group">
+                        <label class="form-label">Codex executable</label>
+                        <input
+                            type="text"
+                            placeholder="codex"
+                            .value=${this._codexCliPath}
+                            @input=${event => this._saveCodexCliPath(event.target.value)}
+                            class=${this._codexError && !this._codexCliPath.trim() ? 'error' : ''}
+                        />
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Codex model</label>
+                        <input
+                            type="text"
+                            placeholder="gpt-5.6-sol"
+                            .value=${this._codexModel}
+                            @input=${event => this._saveCodexModel(event.target.value)}
+                        />
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Working directory</label>
+                        <input
+                            type="text"
+                            placeholder="System temporary directory"
+                            .value=${this._codexWorkingDirectory}
+                            @input=${event => this._saveCodexWorkingDirectory(event.target.value)}
+                        />
+                        <div class="form-hint">
+                            Put <code>lab.md</code> in this directory. It is loaded once as read-only context. GPT-5.6 Sol runs with low effort and
+                            standard speed; shell, web, apps, plugins, and user MCP configuration are disabled. Sign in once with
+                            <code>codex login</code>.
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <div class="config-note">
+                The first start downloads the selected GigaAM weights. Spoken segments are limited to 24 seconds so they stay within GigaAM's
+                short-form inference limit.
+            </div>
+
+            ${this._renderStartButton()} ${this._renderDivider()}
+
+            <div class="mode-links">
+                <button class="mode-link" @click=${() => this._saveMode('byok')}>Use own API keys</button>
+                <button class="mode-link" @click=${() => this._saveMode('local')}>Use local AI</button>
             </div>
         `;
     }
@@ -1331,20 +1484,29 @@ export class MainView extends LitElement {
 
         return html`
             <div class="form-wrapper">
-                ${
-                    this._mode === 'local'
-                        ? html`
-                              <div class="title-row">
-                                  <div class="page-title">Cheating Daddy <span class="mode-suffix">Local AI</span></div>
-                                  <button class="help-btn" @click=${this._openLocalHelp} aria-label="Open Local AI help">${helpIcon}</button>
-                              </div>
-                          `
-                        : html` <div class="page-title">${html`Cheating Daddy <span class="mode-suffix">BYOK</span>`}</div> `
-                }
-                <div class="page-subtitle">${this._mode === 'byok' ? 'Bring your own API keys' : 'Run models locally on your machine'}</div>
+                ${this._mode === 'local'
+                    ? html`
+                          <div class="title-row">
+                              <div class="page-title">Cheating Daddy <span class="mode-suffix">Local AI</span></div>
+                              <button class="help-btn" @click=${this._openLocalHelp} aria-label="Open Local AI help">${helpIcon}</button>
+                          </div>
+                      `
+                    : html`
+                          <div class="page-title">
+                              Cheating Daddy <span class="mode-suffix">${this._mode === 'codex' ? 'GigaAM + Codex' : 'BYOK'}</span>
+                          </div>
+                      `}
+                <div class="page-subtitle">
+                    ${this._mode === 'byok'
+                        ? 'Bring your own API keys'
+                        : this._mode === 'codex'
+                          ? 'Local Russian speech recognition with Codex CLI responses'
+                          : 'Run models locally on your machine'}
+                </div>
 
                 <!-- Cloud mode render branch intentionally disabled. -->
                 ${this._mode === 'byok' ? this._renderByokMode() : ''} ${this._mode === 'local' ? this._renderLocalMode() : ''}
+                ${this._mode === 'codex' ? this._renderCodexMode() : ''}
             </div>
             ${this._mode === 'local' && this._showLocalHelp ? this._renderLocalHelp(closeIcon) : ''}
         `;

@@ -9,6 +9,7 @@
         "package": "electron-forge package",
         "make": "electron-forge make",
         "publish": "electron-forge publish",
+        "test": "node --test",
         "lint": "echo \"No linting configured\""
     },
     "keywords": [
@@ -26,6 +27,7 @@
     "dependencies": {
         "@google/genai": "^1.2.0",
         "electron-squirrel-startup": "^1.0.1",
+        "katex": "^0.16.25",
         "ws": "^8.19.0"
     },
     "devDependencies": {
